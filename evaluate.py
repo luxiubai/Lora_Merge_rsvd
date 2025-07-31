@@ -7,39 +7,131 @@ from peft import PeftModel, LoraConfig, set_peft_model_state_dict
 from safetensors import safe_open
 from datasets import load_dataset as hf_load_dataset, Dataset, IterableDataset, IterableColumn
 from tqdm import tqdm
-from typing import Union
+from typing import Union, Tuple, List, Dict
+from abc import ABC, abstractmethod
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 local_model_path = "model/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
 lora_dir = "./lora"
-piqa_data_dir = "data/piqa"
+local_data_dir = "data"
 
-def load_evaluation_dataset(dataset_name) -> Union[Dataset, IterableDataset, IterableColumn, list, None]:
-    if dataset_name.lower() == "piqa":
-        data_file = os.path.join(piqa_data_dir, "dev.jsonl")
-        labels_file = os.path.join(piqa_data_dir, "dev-labels.lst")
+class DatasetLoader:
+    def __init__(self, base_local_path):
+        self.base_local_path = base_local_path
+        self.web_dataset_map = {
+            "siqa": "1-800-LLMs/siqa"
+        }
 
-        with open(data_file, 'r', encoding='utf-8') as f:
-            data = [json.loads(line) for line in f]
-        with open(labels_file, 'r', encoding='utf-8') as f:
-            labels = [int(line.strip()) for line in f]
-        
-        for i, example in enumerate(data):
-            example["label"] = labels[i]
-        
-        return Dataset.from_list(data)
-    elif dataset_name.lower() == "siqa":
-        dataset_dict = hf_load_dataset("1-800-LLMs/siqa", streaming=False)
-        if "validation" in dataset_dict:
-            return dataset_dict["validation"]
+    def load(self, dataset_name: str, load_method: str = "local") -> Union[Dataset, IterableDataset, IterableColumn, list, None]:
+        load_method = load_method.lower()
+        if load_method == "local":
+            return self._load_local(dataset_name)
+        elif load_method == "web":
+            return self._load_web(dataset_name)
         else:
-            print("警告: SIQA 数据集未找到 'validation' 分割。")
-            return None
-    else:
-        raise ValueError(f"不支持的数据集: {dataset_name}")
+            raise ValueError(f"不支持的加载方式: {load_method}")
 
-def evaluate_model(model, tokenizer, dataset, task_name):
+    def _load_local(self, dataset_name: str):
+        dataset_name = dataset_name.lower()
+        dataset_path = os.path.join(self.base_local_path, dataset_name)
+        
+        data_file = os.path.join(dataset_path, "dev.jsonl")
+        labels_file = os.path.join(dataset_path, "dev-labels.lst")
+
+        if not os.path.exists(data_file) or not os.path.exists(labels_file):
+            print(f"警告: 本地数据文件 '{data_file}' 或 '{labels_file}' 未找到。")
+            return None
+
+        try:
+            with open(data_file, 'r', encoding='utf-8') as f:
+                data = [json.loads(line) for line in f]
+            with open(labels_file, 'r', encoding='utf-8') as f:
+                labels = [int(line.strip()) for line in f]
+            
+            if len(data) != len(labels):
+                print(f"警告: 在 {dataset_name} 中，数据点数量 ({len(data)}) 与标签数量 ({len(labels)}) 不匹配。")
+                return None
+
+            for i, example in enumerate(data):
+                example["label"] = labels[i]
+            
+            return Dataset.from_list(data)
+        except Exception as e:
+            print(f"加载本地数据集 '{dataset_name}' 失败: {e}")
+            return None
+
+    def _load_web(self, dataset_name: str):
+        dataset_name = dataset_name.lower()
+        hf_dataset_name = self.web_dataset_map.get(dataset_name, dataset_name)
+        
+        try:
+            print(f"正在从 Hugging Face Hub 加载数据集: {hf_dataset_name}")
+            dataset_dict = hf_load_dataset(hf_dataset_name, streaming=False)
+            
+            for split in ["validation", "test", "train"]:
+                if split in dataset_dict:
+                    return dataset_dict[split]
+            
+            print(f"警告: 在 {hf_dataset_name} 数据集中未找到 'validation', 'test', or 'train' 分割。")
+            return None
+        except Exception as e:
+            print(f"从网络加载数据集 '{hf_dataset_name}' 失败: {e}")
+            return None
+
+class DatasetProcessor(ABC):
+    @abstractmethod
+    def process(self, example: Dict) -> Tuple[List[str], int, List[str]]:
+        """
+        Processes a single example from a dataset.
+
+        Args:
+            example (Dict): A dictionary representing a single data point.
+
+        Returns:
+            Tuple[List[str], int, List[str]]: A tuple containing:
+                - choices (List[str]): The list of possible answers.
+                - actual_label (int): The index of the correct answer.
+                - formatted_texts (List[str]): The list of texts to be fed to the model, one for each choice.
+        """
+        pass
+
+class PIQAProcessor(DatasetProcessor):
+    def process(self, example: Dict) -> Tuple[List[str], int, List[str]]:
+        question = example["goal"]
+        choices = [example["sol1"], example["sol2"]]
+        actual_label = example["label"]
+        text_template = "Question: {question}\nSolution: {choice}"
+        
+        formatted_texts = [text_template.format(question=question, choice=c) for c in choices]
+        return choices, actual_label, formatted_texts
+
+class SIQAProcessor(DatasetProcessor):
+    def process(self, example: Dict) -> Tuple[List[str], int, List[str]]:
+        context = example["context"]
+        question = example["question"]
+        choices = [example["answerA"], example["answerB"], example["answerC"]]
+        actual_label = int(example["label"]) - 1
+        text_template = "Context: {context}\nQuestion: {question}\nAnswer: {choice}"
+
+        formatted_texts = [text_template.format(context=context, question=question, choice=c) for c in choices]
+        return choices, actual_label, formatted_texts
+
+PROCESSOR_REGISTRY = {
+    obj.__name__.replace("Processor", "").lower(): obj
+    for obj in globals().values()
+    if isinstance(obj, type) and issubclass(obj, DatasetProcessor) and obj is not DatasetProcessor
+}
+
+def get_dataset_processor(task_name: str) -> DatasetProcessor:
+    task_name = task_name.lower()
+    processor_class = PROCESSOR_REGISTRY.get(task_name)
+    if processor_class:
+        return processor_class()
+    else:
+        raise ValueError(f"不支持的任务或未在注册表中找到: {task_name}")
+
+def evaluate_model(model, tokenizer, dataset, processor: DatasetProcessor, task_name: str):
     if not isinstance(dataset, (Dataset, IterableDataset)):
         print(f"警告: {task_name} 数据集类型不正确，跳过评估。")
         return 0.0
@@ -51,27 +143,10 @@ def evaluate_model(model, tokenizer, dataset, task_name):
     for raw_example in tqdm(dataset, desc=f"评估 {task_name}"):
         example = dict(raw_example)
         
-        if task_name.lower() == "piqa":
-            question = example["goal"]
-            choices = [example["sol1"], example["sol2"]]
-            actual_label = example["label"]
-            text_template = "Question: {question}\nSolution: {choice}"
-        else:
-            choices = [example["answerA"], example["answerB"], example["answerC"]]
-            actual_label = int(example["label"]) - 1
-            text_template = "Context: {context}\nQuestion: {question}\nAnswer: {choice}"
+        _choices, actual_label, formatted_texts = processor.process(example)
         
         log_likelihoods = []
-        for choice in choices:
-            if task_name.lower() == "piqa":
-                text = text_template.format(question=question, choice=choice)
-            else:
-                text = text_template.format(
-                    context=example["context"],
-                    question=example["question"],
-                    choice=choice
-                )
-            
+        for text in formatted_texts:
             inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(model.device)
             
             with torch.no_grad():
@@ -98,11 +173,15 @@ def main():
     report_lines.append("| 模型类型 | PIQA 准确率 | SIQA 准确率 | 评估时间 | 可训练参数 |\n")
     report_lines.append("|---|---|---|---|---|\n")
 
-    piqa_dataset = load_evaluation_dataset("piqa")
+    data_loader = DatasetLoader(base_local_path=local_data_dir)
+    piqa_processor = get_dataset_processor("piqa")
+    siqa_processor = get_dataset_processor("siqa")
+
+    piqa_dataset = data_loader.load("piqa", "local")
     if piqa_dataset is None:
         print("PIQA 数据集加载失败，无法进行评估。")
     
-    siqa_dataset = load_evaluation_dataset("siqa")
+    siqa_dataset = data_loader.load("siqa", "web")
     if siqa_dataset is None:
         print("SIQA 数据集加载失败，无法进行评估。")
         
@@ -115,8 +194,8 @@ def main():
     base_params = sum(p.numel() for p in base_model.parameters())
     
     start_time = time.time()
-    piqa_base = evaluate_model(base_model, tokenizer, piqa_dataset, "piqa")
-    siqa_base = evaluate_model(base_model, tokenizer, siqa_dataset, "siqa")
+    piqa_base = evaluate_model(base_model, tokenizer, piqa_dataset, piqa_processor, "piqa")
+    siqa_base = evaluate_model(base_model, tokenizer, siqa_dataset, siqa_processor, "siqa")
     base_time = time.time() - start_time
     report_lines.append(f"| 基础模型 | {piqa_base:.2f}% | {siqa_base:.2f}% | {base_time:.1f}s | {base_params:,} |\n")
     
@@ -200,8 +279,8 @@ def main():
             trainable_params = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
             print(f"总参数: {total_params:,}, 可训练参数: {trainable_params:,} ({trainable_params/total_params:.2%})")
             
-            piqa_score = evaluate_model(peft_model, tokenizer, piqa_dataset, "piqa") if piqa_dataset is not None else 0.0
-            siqa_score = evaluate_model(peft_model, tokenizer, siqa_dataset, "siqa") if siqa_dataset is not None else 0.0
+            piqa_score = evaluate_model(peft_model, tokenizer, piqa_dataset, piqa_processor, "piqa") if piqa_dataset is not None else 0.0
+            siqa_score = evaluate_model(peft_model, tokenizer, siqa_dataset, siqa_processor, "siqa") if siqa_dataset is not None else 0.0
             eval_time = time.time() - start_time
             
             report_lines.append(
