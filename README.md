@@ -118,9 +118,12 @@ alpha_suffix = ".alpha"
 | M_rSVD2 LoRA          | 69.42%      | 50.51%      | 293.2s   | 4,587,520   |
 | M_rSVD3 LoRA          | 68.39%      | 49.33%      | 294.2s   | 9,175,040   |
 
+```
 rSVD1:'min_rank': 4, 'max_rank': 32, 'energy_threshold': 0.99
 rSVD2:'min_rank': 32, 'max_rank': 32, 'energy_threshold': 1.0
 rSVD3:'min_rank': 64, 'max_rank': 64, 'energy_threshold': 1.0
+```
+
 评估报告显示，`M_rSVD1 LoRA` 在 PIQA 和 SIQA 两项任务中都能达到不错的成绩，同时其可训练参数量也相对较低，这表明 rSVD 合并方法在效果和效率之间取得了良好的平衡。
 
 ## 安装与使用
@@ -140,6 +143,8 @@ uv sync
 ```
 
 **注意**: 如果 Pytorch 与设备需求不一致需要更改 pyproject.toml
+
+```toml
 [tool.uv.sources]
 torch = { index = "pytorch-cu126" }
 torchvision = { index = "pytorch-cu126" }
@@ -149,6 +154,7 @@ torchaudio = { index = "pytorch-cu126" }
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
+```
 
 ### 按需运行脚本
 
@@ -174,28 +180,62 @@ uv run evaluate.py  #性能评估
 
 ### 1. 基于随机 SVD 的合并 (rSVD Merge)
 
-$$ W*{avg} = w \cdot W_1 + (1-w) \cdot \sqrt{\frac{\alpha_2}{\alpha_1}} \cdot W_2 $$
-$$ U*{new}, S*{new}, V*{new}^T = \text{rSVD}(W*{avg}, k) $$
-$$ U'*{new} = U*{new} \cdot \sqrt{S*{new}}, \quad D'_{new} = \sqrt{S_{new}} \cdot V\_{new}^T $$
+```math
+W_{avg} = w \cdot W_1 + (1-w) \cdot \sqrt{\frac{\alpha_2}{\alpha_1}} \cdot W_2
+```
+
+```math
+U_{new}, S_{new}, V_{new}^T = \text{rSVD}(W_{avg}, k)
+```
+
+```math
+U'_{new} = U_{new} \cdot \sqrt{S_{new}}, \quad D'_{new} = \sqrt{S_{new}} \cdot V_{new}^T
+```
 
 ### 2. 拼接合并 (Concatenate Merge)
 
-$$ U*{new} = \text{concat}(U_1, U_2, \text{dim}=1) $$
-$$ D*{new} = \text{concat}(D_1, D_2, \text{dim}=0) $$
+```math
+U_{new} = \text{concat}(U_1, U_2, \text{dim}=1)
+```
+
+```math
+D_{new} = \text{concat}(D_1, D_2, \text{dim}=0)
+```
 
 ### 3. 几何平均合并 (Geometric Mean Merge)
 
-$$ U*{new} = \text{sign}(U_1 \odot U_2) \odot \sqrt{|U_1 \odot U_2|} $$
-$$ D*{new} = \text{sign}(D_1 \odot D_2) \odot \sqrt{|D_1 \odot D_2|} $$
+```math
+U_{new} = \text{sign}(U_1 \odot U_2) \odot \sqrt{|U_1 \odot U_2|}
+```
+
+```math
+D_{new} = \text{sign}(D_1 \odot D_2) \odot \sqrt{|D_1 \odot D_2|}
+```
 
 ### 4. SVD 合并 (SVD Merge)
 
-$$ W*{merged} = W_1 + W_2 $$
-$$ U*{new}, S*{new}, V*{new}^T = \text{SVD}(W*{merged}, k) $$
-$$ U'*{new} = U*{new} \cdot \text{diag}(\sqrt{S*{new}}), \quad D'_{new} = \text{diag}(\sqrt{S_{new}}) \cdot V\_{new}^T $$
+```math
+W_{merged} = W_1 + W_2
+```
+
+```math
+U_{new}, S_{new}, V_{new}^T = \text{SVD}(W_{merged}, k)
+```
+
+```math
+U'_{new} = U_{new} \cdot \text{diag}(\sqrt{S_{new}}), \quad D'_{new} = \text{diag}(\sqrt{S_{new}}) \cdot V_{new}^T
+```
 
 ### 5. 加权平均合并 (Weighted Average Merge)
 
-$$ W*{merged} = w \cdot W_1 + (1-w) \cdot W_2 $$
-$$ U*{new}, S*{new}, V*{new}^T = \text{SVD}(W*{merged}, k) $$
-$$ U'*{new} = U*{new} \cdot \text{diag}(\sqrt{S*{new}}), \quad D'_{new} = \text{diag}(\sqrt{S_{new}}) \cdot V\_{new}^T $$
+```math
+W_{merged} = w \cdot W_1 + (1-w) \cdot W_2
+```
+
+```math
+U_{new}, S_{new}, V_{new}^T = \text{SVD}(W_{merged}, k)
+```
+
+```math
+U'_{new} = U_{new} \cdot \text{diag}(\sqrt{S_{new}}), \quad D'_{new} = \text{diag}(\sqrt{S_{new}}) \cdot V_{new}^T
+```
