@@ -91,15 +91,15 @@ alpha_suffix = ".alpha"
 
 | 方法             | 参数总量  | 平均秩 | 合并耗时(s) |
 | ---------------- | --------- | ------ | ----------- |
-| M_Concatenate    | 2,293,760 | 16.00  | 0.06        |
-| M_Geometric_mean | 1,146,880 | 8.00   | 0.08        |
-| M_SVD            | 1,146,880 | 8.00   | 15.64       |
-| M_Weighted_avg   | 1,146,880 | 8.00   | 15.66       |
-| M_rSVD_strategy1 | 1,003,520 | 7.00   | 0.5253      |
-| M_rSVD_strategy2 | 1,146,880 | 8.00   | 0.2981      |
-| M_rSVD_strategy3 | 2,293,760 | 16.00  | 0.3089      |
+| M_Concatenate    | 9,175,040 | 64.00  | 0.09        |
+| M_Geometric_mean | 4,587,520 | 32.00  | 0.10        |
+| M_SVD            | 4,587,520 | 32.00  | 18.94       |
+| M_Weighted_avg   | 4,587,520 | 32.00  | 18.98       |
+| M_rSVD_strategy1 | 4,250,624 | 29.55  | 0.6111      |
+| M_rSVD_strategy2 | 4,587,520 | 32.00  | 0.3434      |
+| M_rSVD_strategy3 | 9,175,040 | 64.00  | 0.4700      |
 
-从报告中可以看出，基于 rSVD 的合并策略（如 `M_rSVD_strategy1`）在参数总量和平均秩上表现出优势，同时合并速度也相对较快。
+实验所合并的 LoRA 是基于`train.py`所训练出来的 LoRA，`model=Qwen/Qwen3-0.6B, r=32, datasets = ["piqa","siqa"]`。从报告中可以看出，基于 rSVD 的合并策略（如 `M_rSVD_strategy1`）在参数总量和平均秩上表现出优势，同时合并速度也相对较快。
 
 ### LoRA 评估报告 (`report/lora_evaluation_report.md`)
 
