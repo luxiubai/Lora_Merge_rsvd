@@ -117,6 +117,30 @@ class SIQAProcessor(DatasetProcessor):
         formatted_texts = [text_template.format(context=context, question=question, choice=c) for c in choices]
         return choices, actual_label, formatted_texts
 
+class ReportGenerator:
+    def __init__(self, tasks: List[str]):
+        self.tasks = tasks
+        self.header = ["模型类型"] + [f"{task.upper()} 准确率" for task in tasks] + ["评估时间", "可训练参数"]
+
+    def get_header(self) -> str:
+        return f"| {' | '.join(self.header)} |\n|{'---|' * len(self.header)}\n"
+
+    def format_row(self, model_name: str, scores: Dict[str, float], eval_time: float, trainable_params: Union[int, None]) -> str:
+        score_values = [f"{scores.get(task, 0.0):.2f}%" for task in self.tasks]
+        time_str = f"{eval_time:.1f}s"
+        params_str = f"{trainable_params:,}" if trainable_params is not None else "/"
+        
+        if not scores:
+            score_values = ["适配器缺失"] * len(self.tasks)
+            time_str = "/"
+            params_str = "/"
+        elif "error" in scores:
+            score_values = ["错误"] * len(self.tasks)
+            time_str = "/"
+            params_str = "/"
+
+        return f"| {model_name} | {' | '.join(score_values)} | {time_str} | {params_str} |\n"
+
 PROCESSOR_REGISTRY = {
     obj.__name__.replace("Processor", "").lower(): obj
     for obj in globals().values()
@@ -163,41 +187,45 @@ def evaluate_model(model, tokenizer, dataset, processor: DatasetProcessor, task_
     return (correct_predictions / total_predictions) * 100
 
 def main():
+    EVALUATION_TASKS = [
+        {"name": "piqa", "load_method": "local"},
+        {"name": "siqa", "load_method": "web"},
+    ]
+    
     tokenizer = AutoTokenizer.from_pretrained(local_model_path)
     tokenizer.padding_side = "left"
-    
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    report_lines = ["\n\n# LoRA 评估报告\n\n"]
-    report_lines.append("| 模型类型 | PIQA 准确率 | SIQA 准确率 | 评估时间 | 可训练参数 |\n")
-    report_lines.append("|---|---|---|---|---|\n")
+    task_names = [task["name"] for task in EVALUATION_TASKS]
+    report_generator = ReportGenerator(tasks=task_names)
+    report_lines = ["\n\n# LoRA 评估报告\n\n", report_generator.get_header()]
 
     data_loader = DatasetLoader(base_local_path=local_data_dir)
-    piqa_processor = get_dataset_processor("piqa")
-    siqa_processor = get_dataset_processor("siqa")
-
-    piqa_dataset = data_loader.load("piqa", "local")
-    if piqa_dataset is None:
-        print("PIQA 数据集加载失败，无法进行评估。")
     
-    siqa_dataset = data_loader.load("siqa", "web")
-    if siqa_dataset is None:
-        print("SIQA 数据集加载失败，无法进行评估。")
-        
+    datasets = {}
+    processors = {}
+    for task in EVALUATION_TASKS:
+        task_name = task["name"]
+        datasets[task_name] = data_loader.load(task_name, task["load_method"])
+        processors[task_name] = get_dataset_processor(task_name)
+        if datasets[task_name] is None:
+            print(f"{task_name.upper()} 数据集加载失败，将跳过此评估。")
+
     base_model = AutoModelForCausalLM.from_pretrained(
         local_model_path,
         torch_dtype=torch.bfloat16,
         device_map="auto"
     )
-    
     base_params = sum(p.numel() for p in base_model.parameters())
     
+    base_scores = {}
     start_time = time.time()
-    piqa_base = evaluate_model(base_model, tokenizer, piqa_dataset, piqa_processor, "piqa")
-    siqa_base = evaluate_model(base_model, tokenizer, siqa_dataset, siqa_processor, "siqa")
+    for task_name in task_names:
+        if datasets[task_name]:
+            base_scores[task_name] = evaluate_model(base_model, tokenizer, datasets[task_name], processors[task_name], task_name)
     base_time = time.time() - start_time
-    report_lines.append(f"| 基础模型 | {piqa_base:.2f}% | {siqa_base:.2f}% | {base_time:.1f}s | {base_params:,} |\n")
+    report_lines.append(report_generator.format_row("基础模型", base_scores, base_time, base_params))
     
     del base_model
     torch.cuda.empty_cache()
@@ -221,7 +249,7 @@ def main():
         
         if not os.path.exists(adapter_path):
             print(f"适配器目录不存在: {adapter_path}")
-            report_lines.append(f"| {name} | 适配器缺失 | 适配器缺失 | / | / |\n")
+            report_lines.append(report_generator.format_row(name, {}, 0, None))
             continue
         
         try:
@@ -244,12 +272,12 @@ def main():
                         ranks[module_name] = rank
             except Exception as e:
                 print(f"无法解析safetensors文件 {safetensors_path}: {e}")
-                report_lines.append(f"| {name} | safetensors解析错误 | safetensors解析错误 | / | / |\n")
+                report_lines.append(report_generator.format_row(name, {"error": 1}, 0, None))
                 continue
 
             if not ranks:
                 print(f"未在 {safetensors_path} 中找到LoRA层，跳过此适配器。")
-                report_lines.append(f"| {name} | 无LoRA层 | 无LoRA层 | / | / |\n")
+                report_lines.append(report_generator.format_row(name, {}, 0, None))
                 continue
 
             lora_config = LoraConfig(
@@ -272,26 +300,23 @@ def main():
                         adapter_weights[key] = f.get_tensor(key)
             
             set_peft_model_state_dict(peft_model, adapter_weights)
-            
             peft_model.set_adapter("default")
             
-            total_params = sum(p.numel() for p in peft_model.parameters())
             trainable_params = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
-            print(f"总参数: {total_params:,}, 可训练参数: {trainable_params:,} ({trainable_params/total_params:.2%})")
             
-            piqa_score = evaluate_model(peft_model, tokenizer, piqa_dataset, piqa_processor, "piqa") if piqa_dataset is not None else 0.0
-            siqa_score = evaluate_model(peft_model, tokenizer, siqa_dataset, siqa_processor, "siqa") if siqa_dataset is not None else 0.0
+            adapter_scores = {}
+            for task_name in task_names:
+                if datasets[task_name]:
+                    adapter_scores[task_name] = evaluate_model(peft_model, tokenizer, datasets[task_name], processors[task_name], task_name)
+            
             eval_time = time.time() - start_time
-            
-            report_lines.append(
-                f"| {name} | {piqa_score:.2f}% | {siqa_score:.2f}% | {eval_time:.1f}s | {trainable_params:,} |\n"
-            )
+            report_lines.append(report_generator.format_row(name, adapter_scores, eval_time, trainable_params))
             
         except Exception as e:
             import traceback
             print(f"评估失败: {str(e)}")
             traceback.print_exc()
-            report_lines.append(f"| {name} | 错误 | 错误 | / | / |\n")
+            report_lines.append(report_generator.format_row(name, {"error": 1}, 0, None))
         
         finally:
             if 'base_model' in locals():
