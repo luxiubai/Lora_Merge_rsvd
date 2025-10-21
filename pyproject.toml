@@ -1,7 +1,7 @@
 [project]
-name = "llm5"
+name = "rsvd"
 version = "0.1.0"
-description = "Add your description here"
+description = "LoRA merge method based on randomized SVD (rSVD) to reduce rank, parameters, and merge time while maintaining model performance."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -22,4 +22,4 @@ torchaudio = { index = "pytorch-cu126" }
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
-explicit = true 
+explicit = true
